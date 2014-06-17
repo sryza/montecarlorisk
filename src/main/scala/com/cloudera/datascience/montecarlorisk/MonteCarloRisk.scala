@@ -26,9 +26,10 @@ import org.apache.commons.math3.random.MersenneTwister
 import org.apache.commons.math3.distribution.MultivariateNormalDistribution
 
 import scala.io.Source
-import java.io.{PrintWriter, File}
+import java.io.PrintWriter
 
-case class Instrument(factorWeights: Array[Double])
+case class Instrument(factorWeights: Array[Double], minValue: Double = 0,
+  maxValue: Double = Double.MaxValue)
 
 class MyRegistrator extends KryoRegistrator {
   override def registerClasses(kryo: Kryo) {
@@ -43,6 +44,7 @@ object MonteCarloRisk {
     sparkConf.set("spark.kryo.registrator", classOf[MyRegistrator].getName)
     val sc = new SparkContext(sparkConf)
 
+    // Parse arguments and read input data
     val instruments = readInstruments(args(0))
     val numTrials = args(1).toInt
     val parallelism = args(2).toInt
@@ -50,57 +52,77 @@ object MonteCarloRisk {
     val factorCovariances = readCovariances(args(4))
     val seed = if (args.length > 5) args(5).toLong else System.currentTimeMillis()
 
+    // Send all instruments to every node
     val broadcastInstruments = sc.broadcast(instruments)
-    val seeds = (seed until seed + parallelism)
 
+    // Generate different seeds so that our simulations don't all end up with the same results
+    val seeds = (seed until seed + parallelism)
     val seedRdd = sc.parallelize(seeds, parallelism)
-    val trialsRdd = seedRdd.flatMap(trialReturns(_, numTrials / parallelism,
+
+    // Main computation: run simulations and compute aggregate return for each
+    val trialsRdd = seedRdd.flatMap(trialValues(_, numTrials / parallelism,
       broadcastInstruments.value, factorMeans, factorCovariances))
 
-//    val sorted = trialsRdd.map(t => (t, None)).sortByKey()
-    //val trials = trialsRdd.collect()
-//    val pw = new PrintWriter(new File("returns.json"))
-//    pw.println("[" + trials.mkString(",") + "]")
-    //pw.close()
+    // Cache the results so that we don't recompute for both of the summarizations below
+    trialsRdd.cache()
+
+    // Calculate VaR
     val varFivePercent = trialsRdd.takeOrdered(numTrials / 20).last
     println("VaR: " + varFivePercent)
+
+    // Kernel density estimation
+    val domain = Range.Double(20.0, 60.0, .2).toArray
+    val densities = KernelDensity.estimate(trialsRdd, 0.25, domain)
+    val pw = new PrintWriter("densities.csv")
+    for (point <- domain.zip(densities)) {
+      pw.println(point._1 + "," + point._2)
+    }
+    pw.close()
   }
 
-  def trialReturns(seed: Long, numTrials: Int, instruments: Seq[Instrument],
+  def trialValues(seed: Long, numTrials: Int, instruments: Seq[Instrument],
       factorMeans: Array[Double], factorCovariances: Array[Array[Double]]): Seq[Double] = {
     val rand = new MersenneTwister(seed)
     val multivariateNormal = new MultivariateNormalDistribution(rand, factorMeans,
       factorCovariances)
 
-    val trialReturns = new Array[Double](numTrials)
+    val trialValues = new Array[Double](numTrials)
     for (i <- 0 until numTrials) {
       val trial = multivariateNormal.sample()
-      trialReturns(i) = trialReturn(trial, instruments)
+      trialValues(i) = trialValue(trial, instruments)
     }
-    trialReturns
+    trialValues
   }
 
-  def trialReturn(trial: Array[Double], instruments: Seq[Instrument]): Double = {
-    var totalReturn = 0.0
+  /**
+   * Calculate the full value of the portfolio under particular trial conditions.
+   */
+  def trialValue(trial: Array[Double], instruments: Seq[Instrument]): Double = {
+    var totalValue = 0.0
     for (instrument <- instruments) {
-      totalReturn += instrumentTrialReturn(instrument, trial)
+      totalValue += instrumentTrialValue(instrument, trial)
     }
-    totalReturn
+    totalValue
   }
 
-  def instrumentTrialReturn(instrument: Instrument, trial: Array[Double]): Double = {
-    var instrumentTrialReturn = 0.0
+  /**
+   * Calculate the value of a particular instrument under particular trial conditions.
+   */
+  def instrumentTrialValue(instrument: Instrument, trial: Array[Double]): Double = {
+    var instrumentTrialValue = 0.0
     var i = 0
     while (i < trial.length) {
-      instrumentTrialReturn += trial(i) * instrument.factorWeights(i)
+      instrumentTrialValue += trial(i) * instrument.factorWeights(i)
       i += 1
     }
-    instrumentTrialReturn
+    Math.min(Math.max(instrumentTrialValue, instrument.minValue), instrument.maxValue)
   }
 
   def readInstruments(instrumentsFile: String): Array[Instrument] = {
     val src = Source.fromFile(instrumentsFile)
-    val instruments = src.getLines().map(_.split(",")).map(x => new Instrument(x.map(_.toDouble)))
+    // First and second elements are the min and max values for the instrument
+    val instruments = src.getLines().map(_.split(",")).map(
+      x => new Instrument(x.slice(2, x.length).map(_.toDouble), x(0).toDouble, x(1).toDouble))
     instruments.toArray
   }
 
