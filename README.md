@@ -26,7 +26,7 @@ To run from a gateway node in a CDH5 cluster:
 
     CONFIG_OPTS="-Dspark.master=local -Dspark.jars=target/montecarlo-risk-0.0.1-SNAPSHOT.jar"
     
-    $JAVA_HOME/bin/java -cp $CLASSPATH $CONFIG_OPTS com.cloudera.datascience.montecarlorisk.MonteCarloRisk <input file> 2
+    $JAVA_HOME/bin/java -cp $CLASSPATH $CONFIG_OPTS com.cloudera.datascience.montecarlorisk.MonteCarloRisk <instruments file> <num trials> <parallellism> <factor means file> <factor covariances file>
 
 This will run the application in a single local process.  If the cluster is running a Spark standalone
 cluster manager, you can replace "-Dspark.master=local" with
