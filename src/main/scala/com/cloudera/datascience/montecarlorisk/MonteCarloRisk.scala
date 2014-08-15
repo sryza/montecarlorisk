@@ -67,7 +67,7 @@ object MonteCarloRisk {
     trialsRdd.cache()
 
     // Calculate VaR
-    val varFivePercent = trialsRdd.takeOrdered(numTrials / 20).last
+    val varFivePercent = trialsRdd.takeOrdered(math.max(numTrials / 20, 1)).last
     println("VaR: " + varFivePercent)
 
     // Kernel density estimation
